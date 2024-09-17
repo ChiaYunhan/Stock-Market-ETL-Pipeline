@@ -1,0 +1,5 @@
+google-cloud-bigquery
+requests
+apache-airflow[google]
+Jinja2
+faker
