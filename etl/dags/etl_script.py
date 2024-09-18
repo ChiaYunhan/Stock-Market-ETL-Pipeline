@@ -236,7 +236,7 @@ def etl():
             fail_on_error=True,
         )
 
-    for symbol in ["AAPL"]:
+    for symbol in ["AAPL", "MSFT", "GOOGL", "NFLX"]:
         check_price_table = check_price_table_exists.override(
             task_id=f"check_{symbol}_price_table"
         )(symbol)
@@ -343,8 +343,14 @@ def etl():
             trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
         )
 
-        b2 >> fetch_insert >> join_2 >> join_1
-        b2 >> do_nothing >> join_2 >> join_1
+        (
+            b2
+            >> Label(f"{symbol}_prices not up to date")
+            >> fetch_insert
+            >> join_2
+            >> join_1
+        )
+        b2 >> Label(f"{symbol}_prices up to date") >> do_nothing >> join_2 >> join_1
 
 
 etl()
