@@ -4,15 +4,16 @@ import logging
 
 import pandas as pd
 from typing import Union, Dict, Optional
-from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook
-from airflow.providers.google.cloud.operators.bigquery import BigQueryInsertJobOperator
+from google.cloud import bigquery
+from google.oauth2 import service_account
+
 from airflow.decorators import dag, task
 from airflow.operators.empty import EmptyOperator
 from airflow.utils.task_group import TaskGroup
 from airflow.utils.trigger_rule import TriggerRule
 from airflow.utils.edgemodifier import Label
-from google.cloud import bigquery
-from google.oauth2 import service_account
+from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook
+
 
 # Config variables
 BQ_CONN_ID = "my_gcp_conn"
@@ -96,7 +97,7 @@ def _process_backfill_data(stock_prices: list[dict]) -> pd.DataFrame:
 def _process_latest_data(stock_prices: list[dict]) -> Dict[str, Union[str, float, int]]:
     """Extract the latest stock data from the time series."""
     # pendulum.yesterday() used instead of today() because scheduled to run around 4am myt but around closing time for NASDAQ
-    date = "2024-09-16"
+    date = pendulum.yesterday().to_date_string()
     latest_entry = stock_prices.get(date, {})
 
     if latest_entry:
@@ -138,7 +139,7 @@ def _process_latest_data(stock_prices: list[dict]) -> Dict[str, Union[str, float
     end_date=pendulum.datetime(2024, 9, 24, tz="America/New_York"),
     catchup=False,
 )
-def branch_test():
+def etl():
     hook = BigQueryHook(gcp_conn_id=BQ_CONN_ID, use_legacy_sql=False)
 
     @task
@@ -206,7 +207,34 @@ def branch_test():
             project_id=BQ_PROJECT,
         )
 
-        return result
+        # Extract the date from the result
+        latest_date = result[0]["Date"]  # This will be a datetime.date object
+
+        # Convert the date to string (e.g., "2024-09-16")
+        latest_date_str = latest_date.strftime("%Y-%m-%d")
+
+        return latest_date_str
+
+    @task()
+    def insert_row_into_bq(data: dict, symbol: str):
+        """
+        Insert a row into BigQuery using the insert_all method and log the data being inserted.
+
+        :param data: A dictionary containing the data for one row.
+        :param symbol: The stock symbol used to identify the correct BigQuery table.
+        """
+        row = [data]
+
+        # Log the data being inserted
+        logging.info(f"Inserting data into {symbol}_prices: {data}")
+
+        hook.insert_all(
+            project_id=BQ_PROJECT,
+            dataset_id=BQ_DATASET,
+            table_id=f"{symbol}_prices",
+            rows=row,
+            fail_on_error=True,
+        )
 
     for symbol in ["AAPL"]:
         check_price_table = check_price_table_exists.override(
@@ -233,26 +261,13 @@ def branch_test():
 
         @task
         def fetch_stock_data(
-            symbol: str, backfill: bool = False, dummy: bool = False
+            symbol: str, backfill: bool = False
         ) -> Union[Dict[str, Union[str, float, int]], pd.DataFrame]:
             """
             Fetch latest stock data for a given symbol from Alpha Vantage API.
             If backfill is True, returns historical data as a pandas DataFrame.
             Otherwise, returns the latest available stock data as a dictionary.
             """
-            if dummy:
-                date = pendulum.yesterday().to_date_string()
-                return {
-                    "Date": date,
-                    "Open": None,
-                    "High": None,
-                    "Low": None,
-                    "Close": None,
-                    "Volume": None,
-                    "Difference": None,
-                    "Difference_type": "no_change",
-                }
-
             base_url, params = _build_api_url(symbol, backfill=backfill)
 
             # Fetch data from the API
@@ -304,7 +319,7 @@ def branch_test():
         def branch_2(symbol=symbol, ti=None) -> str:
             latest_date = ti.xcom_pull(task_ids=f"get_latest_entry_{symbol}_price")
 
-            if latest_date == pendulum.yesterday():
+            if latest_date == pendulum.yesterday().to_date_string():
                 return f"do_nothing_{symbol}"
 
             else:
@@ -314,45 +329,12 @@ def branch_test():
 
         latest_entry >> b2
 
-        @task()
-        def insert_data_into_bq(data: dict, symbol: str):
-            """
-            Insert data into BigQuery task
-            This task inserts the fetched stock data into a BigQuery table.
-            """
-
-            # Construct the SQL query for inserting the data into BigQuery
-            sql_query = f"""
-            INSERT INTO `{BQ_DATASET}.{BQ_PROJECT}.{symbol}_price`
-            (Date, oOpen, High, Low, Close, Volume, Difference, Difference_type)
-            VALUES (
-                '{data["Date"]}', {data["Open"]}, {data["High"]}, {data["Low"]}, 
-                {data["Close"]}, {data["Volume"]}, {data["Difference"]}, '{data["Difference_type"]}'
-            )
-            """
-
-            # Using BigQueryInsertJobOperator to insert the data
-            insert_bq = BigQueryInsertJobOperator(
-                task_id=f"insert_bq_{symbol}",
-                gcp_conn_id=BQ_CONN_ID,
-                configuration={
-                    "query": {
-                        "query": sql_query,
-                        "useLegacySql": False,
-                        "allowLargeResults": True,
-                    }
-                },
-            )
-
         with TaskGroup(group_id=f"fetch_insert_{symbol}") as fetch_insert:
-            data = fetch_stock_data.override(task_id=f"inner_fetch_{symbol}_prices")(
-                symbol, backfill=False, dummy=True
-            )
-            insert_into_bq = insert_data_into_bq.override(
-                task_id=f"inner_insert_bq_{symbol}_price"
-            )(data=data, symbol=symbol)
+            data = fetch_stock_data(symbol)
 
-            data >> insert_into_bq
+            insert_job = insert_row_into_bq(data, symbol)
+
+            data >> insert_job
 
         do_nothing = EmptyOperator(task_id=f"do_nothing_{symbol}")
 
@@ -365,4 +347,4 @@ def branch_test():
         b2 >> do_nothing >> join_2 >> join_1
 
 
-branch_test()
+etl()
