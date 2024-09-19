@@ -1,6 +1,6 @@
 # Stock Market ETL Pipeline
 
-This project performs ETL (Extract, Transform, Load) operations on stock market data using Airflow and Google Cloud.
+This project performs ETL (Extract, Transform, Load) operations on stock market data from a web API using Airflow and Google Cloud.
 
 ## Setup
 
