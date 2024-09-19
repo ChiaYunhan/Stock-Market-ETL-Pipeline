@@ -1,6 +1,7 @@
 import pendulum
 import requests
 import logging
+import os
 
 import pandas as pd
 from typing import Union, Dict, Optional
@@ -17,14 +18,24 @@ from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook
 
 # Config variables
 BQ_CONN_ID = "my_gcp_conn"
-BQ_PROJECT = "etl-gcp-435016"
-BQ_DATASET = "stock_analysis"
-ALPHA_API_KEY = "LGK4OG1SQ1H5C7Q5"
 LOCATION = "asia-southeast1"
+BQ_PROJECT = os.environ.get("GCP_PROJECT_ID")
+BQ_DATASET = os.environ.get("BQ_DATASET_ID")
+ALPHA_API_KEY = os.environ.get("APLHA_API_KEY")
+GCP_SERVICE_JSON_LOC = os.environ.get("GCP_SERVICE_JSON_LOC")
 
 
-def _build_api_url(symbol: str, backfill: bool) -> str:
-    """Build the Alpha Vantage API URL with the correct parameters."""
+def _build_alpha_api_url(symbol: str, backfill: bool) -> str:
+    """
+    Build the Alpha Vantage API URL with the correct parameters for fetching stock data.
+
+    Args:
+        symbol (str): Stock symbol to fetch the data for.
+        backfill (bool): Whether to fetch full data ('full') or recent data ('compact').
+
+    Returns:
+        str: The full API URL with parameters for Alpha Vantage.
+    """
 
     base_url = "https://www.alphavantage.co/query"
     outputsize = "full" if backfill else "compact"
@@ -39,12 +50,22 @@ def _build_api_url(symbol: str, backfill: bool) -> str:
 
 
 def _fetch_price_from_api(base_url: str, params: dict) -> Optional[list[dict]]:
-    """Fetch data from the API and handle errors."""
+    """
+    Fetch stock prices from the Alpha Vantage API and handle any errors.
+
+    Args:
+        base_url (str): The base API URL.
+        params (dict): The parameters to be passed to the API.
+
+    Returns:
+        Optional[list[dict]]: Time series stock data as a dictionary or None if an error occurs.
+    """
     try:
         response = requests.get(base_url, params=params)
-        response.raise_for_status()
+        response.raise_for_status()  # Check for HTTP errors
         data = response.json()
 
+        # Check if the API returned valid data
         if "Meta Data" not in data:
             logging.info(f"API Message: {data['Information']}")
             return None
@@ -57,7 +78,16 @@ def _fetch_price_from_api(base_url: str, params: dict) -> Optional[list[dict]]:
         return None
 
 
-def _get_difference_type(difference: float):
+def _get_difference_type(difference: float) -> str:
+    """
+    Determine the type of difference (positive, negative, or no change) based on the stock price difference.
+
+    Args:
+        difference (float): The difference between opening and closing prices.
+
+    Returns:
+        str: 'positive', 'negative', or 'no change' based on the value of the difference.
+    """
     if difference > 0:
         return "positive"
     elif difference < 0:
@@ -66,8 +96,16 @@ def _get_difference_type(difference: float):
         return "no change"
 
 
-def _process_backfill_data(stock_prices: list[dict]) -> pd.DataFrame:
-    """Convert the time series data to a pandas DataFrame."""
+def _process_backfill_data(stock_prices: dict) -> pd.DataFrame:
+    """
+    Process historical stock data for backfill and convert it into a pandas DataFrame.
+
+    Args:
+        stock_prices (list[dict]): Historical stock price data fetched from the API.
+
+    Returns:
+        pd.DataFrame: Processed DataFrame containing stock price information for multiple dates.
+    """
     stock_info = [
         {
             "Date": date,
@@ -79,6 +117,8 @@ def _process_backfill_data(stock_prices: list[dict]) -> pd.DataFrame:
         }
         for date, values in stock_prices.items()
     ]
+
+    # Convert the list of dictionaries into a DataFrame and process the data
     stock_prices = pd.DataFrame(stock_info)
     stock_prices["Date"] = pd.to_datetime(stock_prices["Date"]).dt.date
     stock_prices["Open"] = stock_prices["Open"].astype(float)
@@ -95,11 +135,22 @@ def _process_backfill_data(stock_prices: list[dict]) -> pd.DataFrame:
 
 
 def _process_latest_data(stock_prices: list[dict]) -> Dict[str, Union[str, float, int]]:
-    """Extract the latest stock data from the time series."""
-    # pendulum.yesterday() used instead of today() because scheduled to run around 4am myt but around closing time for NASDAQ
+    """
+    Process the most recent stock price data and return it as a dictionary.
+
+    Args:
+        stock_prices (list[dict]): Daily stock price data fetched from the API.
+
+    Returns:
+        Dict[str, Union[str, float, int]]: Processed latest stock price data for a single day.
+    """
+    # Get yesterday's date to fetch the most recent data
+    # pendulum.yesterday() used, airflow scheduled to run every 4:15am gmt+8
+    # so then yesterday() gets the right date.
     date = pendulum.yesterday().to_date_string()
     latest_entry = stock_prices.get(date, {})
 
+    # If data is available for the latest entry, calculate the difference and return it
     if latest_entry:
         difference = float(latest_entry.get("2. high")) - float(
             latest_entry.get("4. close")
@@ -120,6 +171,7 @@ def _process_latest_data(stock_prices: list[dict]) -> Dict[str, Union[str, float
             "Difference_type": difference_type,
         }
     else:
+        # If no data is available for the latest date, return default values
         return {
             "Date": date,
             "Open": None,
@@ -140,16 +192,39 @@ def _process_latest_data(stock_prices: list[dict]) -> Dict[str, Union[str, float
     catchup=False,
 )
 def etl():
-    hook = BigQueryHook(gcp_conn_id=BQ_CONN_ID, use_legacy_sql=False)
+    """
+    DAG for extracting stock data from Alpha Vantage API, transforming it, and loading it into BigQuery.
+    """
 
     @task
     def check_price_table_exists(symbol: str) -> bool:
+        """
+        Check if a table for the given stock symbol already exists in BigQuery.
+
+        Args:
+            symbol (str): The stock symbol to check for.
+
+        Returns:
+            bool: True if the table exists, False otherwise.
+        """
+        hook = BigQueryHook(gcp_conn_id=BQ_CONN_ID, use_legacy_sql=False)
         return hook.table_exists(
             project_id=BQ_PROJECT, dataset_id=BQ_DATASET, table_id=f"{symbol}_prices"
         )
 
     @task
     def create_price_table(symbol: str) -> None:
+        """
+        Create a BigQuery table for storing stock price data for the given symbol.
+
+        Args:
+            symbol (str): The stock symbol to create the table for.
+
+        Returns:
+            None
+        """
+
+        hook = BigQueryHook(gcp_conn_id=BQ_CONN_ID, use_legacy_sql=False)
         schema = [
             {"name": "Date", "type": "DATE", "mode": "REQUIRED"},
             {"name": "Open", "type": "FLOAT", "mode": "NULLABLE"},
@@ -173,15 +248,39 @@ def etl():
         print(f"`{BQ_PROJECT}.{BQ_DATASET}.{symbol}_prices` CREATED.")
         print("##############")
 
-    @task(trigger_rule=TriggerRule.ONE_FAILED)
+    @task(trigger_rule=TriggerRule.ALL_FAILED)
     def delete_price_table(symbol: str) -> None:
+        """
+        Delete the BigQuery table storing the stock price data for the given symbol.
+
+        Args:
+            symbol (str): The stock symbol to delete the table for
+
+        Returns:
+            None
+        """
+        hook = BigQueryHook(gcp_conn_id=BQ_CONN_ID, use_legacy_sql=False)
+
         table_id = f"{BQ_PROJECT}.{BQ_DATASET}.{symbol}_prices"
         hook.delete_table(project_id=BQ_PROJECT, table_id=table_id)
 
     @task(trigger_rule=TriggerRule.ALL_SUCCESS)
-    def upload_backfill_bq(data: pd.DataFrame):
+    def upload_backfill_bq(symbol: str, data: pd.DataFrame) -> None:
+        """
+        Uploads price data to BigQuery for a given symbol.
+
+        This task connects to BigQuery using a service account and loads
+        the provided DataFrame into the specified table.
+
+        Args:
+            symbol (str): The stock symbol used to identify the table.
+            data (pd.DataFrame): The DataFrame containing price data to upload.
+
+        Returns:
+            None
+        """
         credentials = service_account.Credentials.from_service_account_file(
-            "config/etl-gcp-435016-ba59ebfa83fd.json"
+            GCP_SERVICE_JSON_LOC
         )
         client = bigquery.Client(credentials=credentials, project=BQ_PROJECT)
         table_id = f"{BQ_PROJECT}.{BQ_DATASET}.{symbol}_prices"
@@ -190,6 +289,20 @@ def etl():
 
     @task
     def get_latest_row_date(symbol: str) -> pendulum.DateTime:
+        """
+        Retrieves the latest date from the price data of a given symbol in BigQuery.
+
+        This task executes a SQL query to obtain the most recent date entry
+        for the specified stock symbol's price data.
+
+        Args:
+            symbol (str): The stock symbol used to identify the price data table.
+
+        Returns:
+            pendulum.DateTime: The latest date from the price data.
+        """
+        hook = BigQueryHook(gcp_conn_id=BQ_CONN_ID, use_legacy_sql=False)
+
         sql_query = f"""
         SELECT Date
         FROM `{BQ_PROJECT}.{BQ_DATASET}.{symbol}_prices`
@@ -216,13 +329,22 @@ def etl():
         return latest_date_str
 
     @task()
-    def insert_row_into_bq(data: dict, symbol: str):
+    def insert_row_into_bq(data: dict, symbol: str) -> None:
         """
-        Insert a row into BigQuery using the insert_all method and log the data being inserted.
+        Inserts a row into BigQuery using the insert_all method.
 
-        :param data: A dictionary containing the data for one row.
-        :param symbol: The stock symbol used to identify the correct BigQuery table.
+        This task logs the data being inserted and adds it to the
+        specified BigQuery table for the given stock symbol.
+
+        Args:
+            data (dict): A dictionary containing the data for one row.
+            symbol (str): The stock symbol used to identify the target BigQuery table.
+
+        Returns:
+            None
         """
+        hook = BigQueryHook(gcp_conn_id=BQ_CONN_ID, use_legacy_sql=False)
+
         row = [data]
 
         # Log the data being inserted
@@ -236,84 +358,123 @@ def etl():
             fail_on_error=True,
         )
 
-    for symbol in ["AAPL", "MSFT", "GOOGL", "NFLX"]:
+    @task
+    def fetch_stock_data(
+        symbol: str, backfill: bool = False
+    ) -> Union[Dict[str, Union[str, float, int]], pd.DataFrame]:
+        """
+        Fetches the latest stock data for a given symbol from the Alpha Vantage API.
+
+        If backfill is True, the function returns historical data as a pandas DataFrame.
+        Otherwise, it returns the latest available stock data as a dictionary.
+
+        Args:
+            symbol (str): The stock symbol for which to fetch data.
+            backfill (bool, optional): Flag indicating whether to fetch historical data.
+                                        Defaults to False.
+
+        Returns:
+            Union[Dict[str, Union[str, float, int]], pd.DataFrame]:
+                - If backfill is True, returns a DataFrame containing historical stock data.
+                - If backfill is False, returns a dictionary with the latest stock data.
+        """
+        base_url, params = _build_alpha_api_url(symbol, backfill=backfill)
+
+        # Fetch data from the API
+        data = _fetch_price_from_api(base_url, params)
+        if not data:
+            # Return default empty results for failed API calls
+            return {
+                "Date": pendulum.yesterday().to_date_string(),
+                "Open": None,
+                "High": None,
+                "Low": None,
+                "Close": None,
+                "Volume": None,
+                "Difference": None,
+                "Difference_type": None,
+            }
+
+        # Process the time series data
+        if backfill:
+            return _process_backfill_data(data)
+        else:
+            return _process_latest_data(data)
+
+    for symbol in ["AAPL"]:
+
+        ################
         check_price_table = check_price_table_exists.override(
-            task_id=f"check_{symbol}_price_table"
+            task_id=f"check_{symbol}_prices_exist"
         )(symbol)
 
-        join_1 = EmptyOperator(
+        price_join_1 = EmptyOperator(
             task_id=f"{symbol}_end_task",
             trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
         )
 
-        @task.branch()
+        @task.branch(task_id=f"branch_1_{symbol}")
         def branch_1(symbol=symbol, ti=None) -> str:
-            price_table_exists = ti.xcom_pull(task_ids=f"check_{symbol}_price_table")
+            price_table_exists = ti.xcom_pull(task_ids=f"check_{symbol}_prices_exist")
 
             if price_table_exists:
                 return f"get_latest_entry_{symbol}_price"
             else:
-                return f"create_backfill_{symbol}"
+                return f"create_backfill_{symbol}_group"
 
-        b1 = branch_1.override(task_id=f"branch_1_{symbol}")()
+        b1 = branch_1()
 
         check_price_table >> b1
 
-        @task
-        def fetch_stock_data(
-            symbol: str, backfill: bool = False
-        ) -> Union[Dict[str, Union[str, float, int]], pd.DataFrame]:
+        ################
+
+        with TaskGroup(group_id=f"create_backfill_{symbol}_group") as create_backfill:
             """
-            Fetch latest stock data for a given symbol from Alpha Vantage API.
-            If backfill is True, returns historical data as a pandas DataFrame.
-            Otherwise, returns the latest available stock data as a dictionary.
+            TaskGroup for handling the backfill process of stock price data for a specific symbol.
+
+            This TaskGroup performs the following tasks:
+            1. Creates a price table in BigQuery if it does not exist.
+            2. Fetches historical stock data for the given symbol.
+            3. Uploads the fetched data to the created price table in BigQuery.
+            4. Deletes the old price table after successful upload.
+
+            Tasks within this group:
+            - `inner_create_{symbol}_prices_table`: Creates the price table.
+            - `inner_fetch_{symbol}_backfill`: Fetches historical stock data.
+            - `inner_upload_{symbol}_backfill_bq`: Uploads data to BigQuery.
+            - `inner_delete_{symbol}_prices_table`: Deletes the old price table.
+
+            Parameters:
+                symbol (str): The stock symbol for which the backfill process is being performed.
             """
-            base_url, params = _build_api_url(symbol, backfill=backfill)
 
-            # Fetch data from the API
-            data = _fetch_price_from_api(base_url, params)
-            if not data:
-                # Return default empty results for failed API calls
-                return {
-                    "Date": pendulum.yesterday().to_date_string(),
-                    "Open": None,
-                    "High": None,
-                    "Low": None,
-                    "Close": None,
-                    "Volume": None,
-                    "Difference": None,
-                    "Difference_type": None,
-                }
-
-            # Process the time series data
-            if backfill:
-                return _process_backfill_data(data)
-            else:
-                return _process_latest_data(data)
-
-        with TaskGroup(group_id=f"create_backfill_{symbol}") as create_backfill:
             create_table = create_price_table.override(
                 task_id=f"inner_create_{symbol}_prices_table"
             )(symbol=symbol)
-            data = fetch_stock_data.override(task_id=f"inner_fetch_{symbol}_prices")(
-                symbol, backfill=True
+
+            data = fetch_stock_data.override(task_id=f"inner_fetch_{symbol}_backfill")(
+                symbol=symbol, backfill=True
             )
+
             upload = upload_backfill_bq.override(
-                task_id=f"upload_{symbol}_backfill_bq"
-            )(data)
+                task_id=f"inner_upload_{symbol}_backfill_bq"
+            )(symbol=symbol, data=data)
+
             delete = delete_price_table.override(
-                task_id=f"delete_{symbol}_prices_table"
+                task_id=f"inner_delete_{symbol}_prices_table"
             )(symbol)
 
             [create_table, data] >> upload
-            [create_table, data] >> delete
+            create_table >> delete
 
         latest_entry = get_latest_row_date.override(
             task_id=f"get_latest_entry_{symbol}_price"
         )(symbol)
 
-        b1 >> Label("Table doesnt exists") >> create_backfill >> join_1
+        b1 >> Label("Table doesnt exists") >> create_backfill >> price_join_1
         b1 >> Label("Table exists") >> latest_entry
+
+        ################
 
         @task.branch()
         def branch_2(symbol=symbol, ti=None) -> str:
@@ -329,17 +490,38 @@ def etl():
 
         latest_entry >> b2
 
-        with TaskGroup(group_id=f"fetch_insert_{symbol}") as fetch_insert:
-            data = fetch_stock_data(symbol)
+        ################
 
-            insert_job = insert_row_into_bq(data, symbol)
+        with TaskGroup(group_id=f"fetch_insert_{symbol}") as fetch_insert:
+            """
+            TaskGroup for fetching the latest stock data and inserting it into BigQuery.
+
+            This TaskGroup performs the following tasks for the specified stock symbol:
+            1. Fetches the latest stock data using the Alpha Vantage API.
+            2. Inserts the fetched data into the corresponding BigQuery table.
+
+            Tasks within this group:
+            - `inner_fetch_latest_{symbol}`: Fetches the latest stock data.
+            - `inner_insert_latest_{symbol}`: Inserts the fetched data into BigQuery.
+
+            Parameters:
+                symbol (str): The stock symbol for which to fetch and insert data.
+            """
+
+            data = fetch_stock_data.override(task_id=f"inner_fetch_latest_{symbol}")(
+                symbol=symbol, backfill=False
+            )
+
+            insert_job = insert_row_into_bq.override(
+                task_id=f"inner_insert_latest_{symbol}"
+            )(data=data, symbol=symbol)
 
             data >> insert_job
 
         do_nothing = EmptyOperator(task_id=f"do_nothing_{symbol}")
 
-        join_2 = EmptyOperator(
-            task_id=f"join_2_{symbol}",
+        price_join_2 = EmptyOperator(
+            task_id=f"price_join_2_{symbol}",
             trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
         )
 
@@ -347,10 +529,16 @@ def etl():
             b2
             >> Label(f"{symbol}_prices not up to date")
             >> fetch_insert
-            >> join_2
-            >> join_1
+            >> price_join_2
+            >> price_join_1
         )
-        b2 >> Label(f"{symbol}_prices up to date") >> do_nothing >> join_2 >> join_1
+        (
+            b2
+            >> Label(f"{symbol}_prices up to date")
+            >> do_nothing
+            >> price_join_2
+            >> price_join_1
+        )
 
 
 etl()
