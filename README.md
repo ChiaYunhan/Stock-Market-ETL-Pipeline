@@ -18,10 +18,10 @@ ALPHA_API_KEY=FJHSDF798F
 GCP_SERVICE_JSON_LOC=config/etl-melon-00010-h4j23hjk.json
 ```
 
-### 2. Create a conneciton in Airflow to Google Cloud
-![airflow google cloud connection settings](https://github.com/ChiaYunhan/etl_gcp/blob/main/airflow%20googel%20cloud%20connection.png?raw=true)
+### 2. Simple run `docker compose up (optionally with -d)`
 
-### 3. Simple run `docker compose up (optionally with -d)`
+### 3. Create a conneciton in Airflow to Google Cloud
+![airflow google cloud connection settings](https://github.com/ChiaYunhan/etl_gcp/blob/main/airflow%20googel%20cloud%20connection.png?raw=true)
 
 # Current Issues (trying to fix or solve)
 1. **Table schema with multiple symbols**:
