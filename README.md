@@ -8,7 +8,7 @@ This project performs ETL (Extract, Transform, Load) operations on stock market 
 
 - Place the `.env` file anywhere in the directory (e.g., in the `etl` folder).
 
-#### Example `.env` file:
+#### Example `.env` file: (not real values, be sure to replace with your own)
 
 ```bash
 AIRFLOW_UID=50000 #keep at 50000
