@@ -23,7 +23,7 @@ GCP_SERVICE_JSON_LOC=config/etl-melon-00010-h4j23hjk.json
 ### 3. Create a conneciton in Airflow to Google Cloud
 ![airflow google cloud connection settings](https://github.com/ChiaYunhan/etl_gcp/blob/main/airflow%20googel%20cloud%20connection.png?raw=true)
 
-# Current Issues (trying to fix or solve)
+# Current Issues (trying to fix)
 1. **Table schema with multiple symbols**:
     - When using more than one symbol (e.g., ['AAPL', 'GOOGL', 'MSFT']), only the last symbol (MSFT) generates the table with the correct schema. Previous symbols create schemaless tables, causing issues in the backfill workflow.
 
