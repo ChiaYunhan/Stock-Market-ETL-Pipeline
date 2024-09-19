@@ -11,7 +11,7 @@ This project performs ETL (Extract, Transform, Load) operations on stock market 
 #### Example `.env` file:
 
 ```bash
-AIRFLOW_UID=50000
+AIRFLOW_UID=50000 #keep at 50000
 GCP_PROJECT_ID=etl-melon-00010
 BQ_DATASET_ID=stock_study_prices
 ALPHA_API_KEY=FJHSDF798F
