@@ -30,8 +30,8 @@ GCP_SERVICE_JSON_LOC=config/etl-melon-00010-h4j23hjk.json
 # Future Development 
 1. **Simple holiday and weekend checks:**
     - Add tasks to check if the current day is a holiday or weeked, if so, the pipeline won't run.
-2. **Adding more data sources:**
-    -Incorporate news sentiment data from:
-        -**Alpha Vantage** (provides sentiment directly)
-        -**News AP** (requires performing sentiment analysis indepedently)
-    -Merge insights from stock data and news sentiment for better analysis.
+2. **Adding more data sources**:
+    - Incorporate news sentiment data from:
+        - **Alpha Vantage** (provides sentiment directly).
+        - **News API** (requires performing sentiment analysis independently).
+    - Merge insights from stock data and news sentiment for better analysis.
