@@ -50,7 +50,7 @@ def _build_alpha_api_url(symbol: str, backfill: bool) -> str:
     return base_url, params
 
 
-def _fetch_price_from_api(base_url: str, params: dict) -> Optional[list[dict]]:
+def _fetch_price_from_api(base_url: str, params: dict) -> Union[bool, list[dict]]:
     """
     Fetch stock prices from the Alpha Vantage API and handle any errors.
 
@@ -69,14 +69,14 @@ def _fetch_price_from_api(base_url: str, params: dict) -> Optional[list[dict]]:
         # Check if the API returned valid data
         if "Information" in data:
             logging.info(f"API Message: {data['Information']}")
-            return None
+            return False
 
         time_series = data["Time Series (Daily)"]
         return time_series
 
     except requests.RequestException as e:
         logging.error(f"Error fetching data: {e}")
-        return None
+        return False
 
 
 def _get_difference_type(difference: float) -> str:
@@ -213,7 +213,7 @@ def etl():
             return False
 
     @task
-    def create_dataset():
+    def create_dataset() -> bool:
         """
         Creates a dataset with the default table expiration set to 7 days in BigQuery.
         """
@@ -231,6 +231,7 @@ def etl():
         )
 
         print(f"Dataset {BQ_DATASET} created or updated successfully.")
+        return True
 
     @task
     def check_price_table_exists(symbol: str) -> bool:
@@ -469,8 +470,14 @@ def etl():
                 trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
             )
 
-            @task.branch(task_id=f"branch_1_{symbol}")
-            def branch_1(symbol=symbol, ti=None) -> str:
+            @task.branch(
+                task_id=f"branch_1_{symbol}", trigger_rule=TriggerRule.ONE_SUCCESS
+            )
+            def branch_1(dataset_just_created: bool, symbol=symbol, ti=None) -> str:
+
+                if dataset_just_created:
+                    return f"stock_prices_operation.create_backfill_{symbol}_group"
+
                 price_table_exists = ti.xcom_pull(
                     task_ids=f"stock_prices_operation.check_{symbol}_prices_exists"
                 )
@@ -480,7 +487,7 @@ def etl():
                 else:
                     return f"stock_prices_operation.create_backfill_{symbol}_group"
 
-            b1 = branch_1()
+            b1 = branch_1(create_dataset)
 
             check_price_table >> b1
 
@@ -531,7 +538,6 @@ def etl():
                 task_id=f"get_latest_entry_{symbol}_price"
             )(symbol)
 
-            create_dataset >> create_backfill
             b1 >> Label("Table doesnt exists") >> create_backfill >> price_join_1
             b1 >> Label("Table exists") >> latest_entry
 
