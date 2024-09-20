@@ -14,6 +14,7 @@ from airflow.utils.task_group import TaskGroup
 from airflow.utils.trigger_rule import TriggerRule
 from airflow.utils.edgemodifier import Label
 from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook
+from google.api_core import exceptions
 
 
 # Config variables
@@ -66,7 +67,7 @@ def _fetch_price_from_api(base_url: str, params: dict) -> Optional[list[dict]]:
         data = response.json()
 
         # Check if the API returned valid data
-        if "Meta Data" not in data:
+        if "Information" in data:
             logging.info(f"API Message: {data['Information']}")
             return None
 
@@ -195,6 +196,41 @@ def etl():
     """
     DAG for extracting stock data from Alpha Vantage API, transforming it, and loading it into BigQuery.
     """
+
+    @task
+    def get_dataset_exists() -> bool:
+        """
+        Check if a dataset already exists in BigQuery.
+
+        Returns:
+            bool: True if the dataset exists, False otherwise.
+        """
+        hook = BigQueryHook(gcp_conn_id=BQ_CONN_ID, use_legacy_sql=False)
+        try:
+            hook.get_dataset(project_id=BQ_PROJECT, dataset_id=BQ_DATASET)
+            return True
+        except exceptions.NotFound:
+            return False
+
+    @task
+    def create_dataset():
+        """
+        Creates a dataset with the default table expiration set to 7 days in BigQuery.
+        """
+        hook = BigQueryHook(gcp_conn_id=BQ_CONN_ID, use_legacy_sql=False)
+
+        dataset_resourse = {
+            "defaultTableExpirationMs": "604800000",  # 7 days in milliseconds
+        }
+
+        hook.create_empty_dataset(
+            project_id=BQ_PROJECT,
+            dataset_id=BQ_DATASET,
+            exists_ok=True,  # This will prevent errors if the dataset already exists
+            dataset_reference=dataset_resourse,
+        )
+
+        print(f"Dataset {BQ_DATASET} created or updated successfully.")
 
     @task
     def check_price_table_exists(symbol: str) -> bool:
@@ -401,144 +437,162 @@ def etl():
         else:
             return _process_latest_data(data)
 
-    for symbol in ["AAPL"]:
+    get_dataset = get_dataset_exists.override(task_id="check_dataset_exists")()
 
-        ################
-        check_price_table = check_price_table_exists.override(
-            task_id=f"check_{symbol}_prices_exist"
-        )(symbol)
+    @task.branch(task_id="check_dataset_exists")
+    def check_dataset(ti=None) -> str:
+        dataset_exists = ti.xcom_pull(task_ids="check_dataset_exists")
 
-        price_join_1 = EmptyOperator(
-            task_id=f"{symbol}_end_task",
-            trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
-        )
+        if dataset_exists:
+            return "stock_prices_operation"
 
-        @task.branch(task_id=f"branch_1_{symbol}")
-        def branch_1(symbol=symbol, ti=None) -> str:
-            price_table_exists = ti.xcom_pull(task_ids=f"check_{symbol}_prices_exist")
+        else:
+            return "create_dataset"
 
-            if price_table_exists:
-                return f"get_latest_entry_{symbol}_price"
-            else:
-                return f"create_backfill_{symbol}_group"
+    check_dataset = check_dataset()
 
-        b1 = branch_1()
+    get_dataset >> check_dataset
 
-        check_price_table >> b1
+    create_dataset = create_dataset()
 
-        ################
+    with TaskGroup(group_id="stock_prices_operation") as stock_prices:
 
-        with TaskGroup(group_id=f"create_backfill_{symbol}_group") as create_backfill:
-            """
-            TaskGroup for handling the backfill process of stock price data for a specific symbol.
+        for symbol in ["AAPL", "MSFT"]:
 
-            This TaskGroup performs the following tasks:
-            1. Creates a price table in BigQuery if it does not exist.
-            2. Fetches historical stock data for the given symbol.
-            3. Uploads the fetched data to the created price table in BigQuery.
-            4. Deletes the old price table after successful upload.
-
-            Tasks within this group:
-            - `inner_create_{symbol}_prices_table`: Creates the price table.
-            - `inner_fetch_{symbol}_backfill`: Fetches historical stock data.
-            - `inner_upload_{symbol}_backfill_bq`: Uploads data to BigQuery.
-            - `inner_delete_{symbol}_prices_table`: Deletes the old price table.
-
-            Parameters:
-                symbol (str): The stock symbol for which the backfill process is being performed.
-            """
-
-            create_table = create_price_table.override(
-                task_id=f"inner_create_{symbol}_prices_table"
-            )(symbol=symbol)
-
-            data = fetch_stock_data.override(task_id=f"inner_fetch_{symbol}_backfill")(
-                symbol=symbol, backfill=True
-            )
-
-            upload = upload_backfill_bq.override(
-                task_id=f"inner_upload_{symbol}_backfill_bq"
-            )(symbol=symbol, data=data)
-
-            delete = delete_price_table.override(
-                task_id=f"inner_delete_{symbol}_prices_table"
+            ################
+            check_price_table = check_price_table_exists.override(
+                task_id=f"check_{symbol}_prices_exists"
             )(symbol)
 
-            [create_table, data] >> upload
-            create_table >> delete
-
-        latest_entry = get_latest_row_date.override(
-            task_id=f"get_latest_entry_{symbol}_price"
-        )(symbol)
-
-        b1 >> Label("Table doesnt exists") >> create_backfill >> price_join_1
-        b1 >> Label("Table exists") >> latest_entry
-
-        ################
-
-        @task.branch()
-        def branch_2(symbol=symbol, ti=None) -> str:
-            latest_date = ti.xcom_pull(task_ids=f"get_latest_entry_{symbol}_price")
-
-            if latest_date == pendulum.yesterday().to_date_string():
-                return f"do_nothing_{symbol}"
-
-            else:
-                return f"fetch_insert_{symbol}"
-
-        b2 = branch_2.override(task_id=f"branch_2_{symbol}")()
-
-        latest_entry >> b2
-
-        ################
-
-        with TaskGroup(group_id=f"fetch_insert_{symbol}") as fetch_insert:
-            """
-            TaskGroup for fetching the latest stock data and inserting it into BigQuery.
-
-            This TaskGroup performs the following tasks for the specified stock symbol:
-            1. Fetches the latest stock data using the Alpha Vantage API.
-            2. Inserts the fetched data into the corresponding BigQuery table.
-
-            Tasks within this group:
-            - `inner_fetch_latest_{symbol}`: Fetches the latest stock data.
-            - `inner_insert_latest_{symbol}`: Inserts the fetched data into BigQuery.
-
-            Parameters:
-                symbol (str): The stock symbol for which to fetch and insert data.
-            """
-
-            data = fetch_stock_data.override(task_id=f"inner_fetch_latest_{symbol}")(
-                symbol=symbol, backfill=False
+            price_join_1 = EmptyOperator(
+                task_id=f"{symbol}_end_task",
+                trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
             )
 
-            insert_job = insert_row_into_bq.override(
-                task_id=f"inner_insert_latest_{symbol}"
-            )(data=data, symbol=symbol)
+            @task.branch(task_id=f"branch_1_{symbol}")
+            def branch_1(symbol=symbol, ti=None) -> str:
+                price_table_exists = ti.xcom_pull(
+                    task_ids=f"stock_prices_operation.check_{symbol}_prices_exists"
+                )
 
-            data >> insert_job
+                if price_table_exists:
+                    return f"stock_prices_operation.get_latest_entry_{symbol}_price"
+                else:
+                    return f"stock_prices_operation.create_backfill_{symbol}_group"
 
-        do_nothing = EmptyOperator(task_id=f"do_nothing_{symbol}")
+            b1 = branch_1()
 
-        price_join_2 = EmptyOperator(
-            task_id=f"price_join_2_{symbol}",
-            trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
-        )
+            check_price_table >> b1
 
-        (
-            b2
-            >> Label(f"{symbol}_prices not up to date")
-            >> fetch_insert
-            >> price_join_2
-            >> price_join_1
-        )
-        (
-            b2
-            >> Label(f"{symbol}_prices up to date")
-            >> do_nothing
-            >> price_join_2
-            >> price_join_1
-        )
+            ################
+
+            with TaskGroup(
+                group_id=f"create_backfill_{symbol}_group"
+            ) as create_backfill:
+                """
+                TaskGroup for handling the backfill process of stock price data for a specific symbol.
+
+                This TaskGroup performs the following tasks:
+                1. Creates a price table in BigQuery if it does not exist.
+                2. Fetches historical stock data for the given symbol.
+                3. Uploads the fetched data to the created price table in BigQuery.
+                4. Deletes the old price table after successful upload.
+
+                Tasks within this group:
+                - `inner_create_{symbol}_prices_table`: Creates the price table.
+                - `inner_fetch_{symbol}_backfill`: Fetches historical stock data.
+                - `inner_upload_{symbol}_backfill_bq`: Uploads data to BigQuery.
+                - `inner_delete_{symbol}_prices_table`: Deletes the old price table.
+
+                Parameters:
+                    symbol (str): The stock symbol for which the backfill process is being performed.
+                """
+
+                create_table = create_price_table.override(
+                    task_id=f"inner_create_{symbol}_prices_table"
+                )(symbol=symbol)
+
+                data = fetch_stock_data.override(
+                    task_id=f"inner_fetch_{symbol}_backfill"
+                )(symbol=symbol, backfill=True)
+
+                upload = upload_backfill_bq.override(
+                    task_id=f"inner_upload_{symbol}_backfill_bq"
+                )(symbol=symbol, data=data)
+
+                delete = delete_price_table.override(
+                    task_id=f"inner_delete_{symbol}_prices_table"
+                )(symbol)
+
+                [create_table, data] >> upload
+                create_table >> delete
+
+            latest_entry = get_latest_row_date.override(
+                task_id=f"get_latest_entry_{symbol}_price"
+            )(symbol)
+
+            create_dataset >> create_backfill
+            b1 >> Label("Table doesnt exists") >> create_backfill >> price_join_1
+            b1 >> Label("Table exists") >> latest_entry
+
+            ################
+
+            @task.branch()
+            def branch_2(symbol=symbol, ti=None) -> str:
+                latest_date = ti.xcom_pull(
+                    task_ids=f"stock_prices_operation.get_latest_entry_{symbol}_price"
+                )
+
+                if latest_date == pendulum.yesterday().to_date_string():
+                    return f"stock_prices_operation.do_nothing_{symbol}"
+
+                else:
+                    return f"stock_prices_operation.fetch_insert_{symbol}"
+
+            b2 = branch_2.override(task_id=f"branch_2_{symbol}")()
+
+            latest_entry >> b2
+
+            ################
+
+            with TaskGroup(group_id=f"fetch_insert_{symbol}") as fetch_insert:
+                """
+                TaskGroup for fetching the latest stock data and inserting it into BigQuery.
+
+                This TaskGroup performs the following tasks for the specified stock symbol:
+                1. Fetches the latest stock data using the Alpha Vantage API.
+                2. Inserts the fetched data into the corresponding BigQuery table.
+
+                Tasks within this group:
+                - `inner_fetch_latest_{symbol}`: Fetches the latest stock data.
+                - `inner_insert_latest_{symbol}`: Inserts the fetched data into BigQuery.
+
+                Parameters:
+                    symbol (str): The stock symbol for which to fetch and insert data.
+                """
+
+                data = fetch_stock_data.override(
+                    task_id=f"inner_fetch_latest_{symbol}"
+                )(symbol=symbol, backfill=False)
+
+                insert_job = insert_row_into_bq.override(
+                    task_id=f"inner_insert_latest_{symbol}"
+                )(data=data, symbol=symbol)
+
+                data >> insert_job
+
+            do_nothing = EmptyOperator(task_id=f"do_nothing_{symbol}")
+
+            (
+                b2
+                >> Label(f"{symbol}_prices not up to date")
+                >> fetch_insert
+                >> price_join_1
+            )
+            (b2 >> Label(f"{symbol}_prices up to date") >> do_nothing >> price_join_1)
+
+        check_dataset >> create_dataset
+        check_dataset >> stock_prices
 
 
 etl()

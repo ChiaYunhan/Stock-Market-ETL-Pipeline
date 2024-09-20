@@ -2,3 +2,5 @@
 *_api.txt
 *.json
 *.env
+test.py
+*.pyc
