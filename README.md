@@ -2,16 +2,20 @@
 
 This project performs ETL (Extract, Transform, Load) operations on stock market data from a web API using Airflow and Google Cloud.
 
+## Workflow
+
+![workflow](https://github.com/ChiaYunhan/etl_gcp/blob/main/workflow.png?raw=true)
+
 ## Setup
 
 ### 1. Create a `.env` File
 
 - Place the `.env` file anywhere in the directory (e.g., in the `etl` folder).
 
-#### Example `.env` file:
+#### Example `.env` file: (not real values, be sure to replace with your own)
 
 ```bash
-AIRFLOW_UID=50000
+AIRFLOW_UID=50000 #keep at 50000
 GCP_PROJECT_ID=etl-melon-00010
 BQ_DATASET_ID=stock_study_prices
 ALPHA_API_KEY=FJHSDF798F
