@@ -2,6 +2,10 @@
 
 This project performs ETL (Extract, Transform, Load) operations on stock market data from a web API using Airflow and Google Cloud.
 
+## Workflow
+
+![workflow](https://github.com/ChiaYunhan/etl_gcp/blob/main/workflow.png?raw=true)
+
 ## Setup
 
 ### 1. Create a `.env` File
