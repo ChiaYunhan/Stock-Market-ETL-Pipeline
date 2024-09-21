@@ -8,7 +8,9 @@ This project performs ETL (Extract, Transform, Load) operations on stock market 
 
 ## Setup
 
-### 1. Create a `.env` File
+### 1. Download Docker desktop
+
+### 2. Create a `.env` File
 
 - Place the `.env` file anywhere in the directory (e.g., in the `etl` folder).
 
@@ -22,9 +24,9 @@ ALPHA_API_KEY=FJHSDF798F
 GCP_SERVICE_JSON_LOC=config/etl-melon-00010-h4j23hjk.json
 ```
 
-### 2. Simple run `docker compose up (optionally with -d)`
+### 3. Simple run `docker compose up (optionally with -d)`
 
-### 3. Create a conneciton in Airflow to Google Cloud
+### 4. Create a conneciton in Airflow to Google Cloud
 ![airflow google cloud connection settings](https://github.com/ChiaYunhan/etl_gcp/blob/main/airflow%20googel%20cloud%20connection.png?raw=true)
 
 # Current Issues (trying to fix)
