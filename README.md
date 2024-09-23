@@ -30,7 +30,10 @@ GCP_SERVICE_JSON_LOC=config/etl-melon-00010-h4j23hjk.json
 ### 2. 
 ```bash
 cd etl
+# to start
 docker compose up -d
+# to stop (optionally, -v), -v removes data in volumes as well, in this case the connection config to BQ you created earlier
+docker compose down 
 ```
 
 ### 3. Create a conneciton in Airflow to Google Cloud
