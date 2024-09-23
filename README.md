@@ -32,7 +32,7 @@ GCP_SERVICE_JSON_LOC=config/etl-melon-00010-h4j23hjk.json
 cd etl
 # to start
 docker compose up -d
-# to stop (optionally, -v), -v removes data in volumes as well, in this case the connection config to BQ you created earlier
+# to stop (optionally, -v), -v removes data in volumes as well, in this case the connection config to BQ you will be creating below
 docker compose down 
 ```
 
