@@ -22,7 +22,7 @@ BQ_CONN_ID = "my_gcp_conn"
 LOCATION = "asia-southeast1"
 BQ_PROJECT = os.environ.get("GCP_PROJECT_ID")
 BQ_DATASET = os.environ.get("BQ_DATASET_ID")
-ALPHA_API_KEY = os.environ.get("APLHA_API_KEY")
+ALPHA_API_KEY = os.environ.get("ALPHA_API_KEY")
 GCP_SERVICE_JSON_LOC = os.environ.get("GCP_SERVICE_JSON_LOC")
 
 
@@ -67,7 +67,7 @@ def _fetch_price_from_api(base_url: str, params: dict) -> Union[bool, list[dict]
         data = response.json()
 
         # Check if the API returned valid data
-        if "Information" in data:
+        if "Time Series (Daily)" not in data:
             logging.info(f"API Message: {data['Information']}")
             return False
 
@@ -189,7 +189,7 @@ def _process_latest_data(stock_prices: list[dict]) -> Dict[str, Union[str, float
     dag_id="stock_etl_gcp",
     schedule="15 16 * * *",
     start_date=pendulum.datetime(2024, 9, 16, tz="America/New_York"),
-    end_date=pendulum.datetime(2024, 9, 24, tz="America/New_York"),
+    end_date=pendulum.datetime(2024, 10, 16, tz="America/New_York"),
     catchup=False,
 )
 def etl():
@@ -285,7 +285,7 @@ def etl():
         print(f"`{BQ_PROJECT}.{BQ_DATASET}.{symbol}_prices` CREATED.")
         print("##############")
 
-    @task(trigger_rule=TriggerRule.ALL_FAILED)
+    @task(trigger_rule=TriggerRule.ONE_FAILED)
     def delete_price_table(symbol: str) -> None:
         """
         Delete the BigQuery table storing the stock price data for the given symbol.
@@ -458,7 +458,7 @@ def etl():
 
     with TaskGroup(group_id="stock_prices_operation") as stock_prices:
 
-        for symbol in ["AAPL", "MSFT"]:
+        for symbol in ["AAPL"]:
 
             ################
             check_price_table = check_price_table_exists.override(
@@ -532,7 +532,7 @@ def etl():
                 )(symbol)
 
                 [create_table, data] >> upload
-                create_table >> delete
+                [create_table, data] >> delete
 
             latest_entry = get_latest_row_date.override(
                 task_id=f"get_latest_entry_{symbol}_price"
