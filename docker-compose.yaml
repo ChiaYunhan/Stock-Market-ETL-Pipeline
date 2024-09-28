@@ -83,6 +83,7 @@ x-airflow-common:
       condition: service_healthy
     postgres:
       condition: service_healthy
+  env_file: '.env'
 
 services:
   postgres:
@@ -130,7 +131,6 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
-    env_file: '.env'
 
   airflow-scheduler:
     <<: *airflow-common
@@ -146,7 +146,6 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
-    env_file: '.env'
 
   airflow-worker:
     <<: *airflow-common
@@ -170,7 +169,6 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
-    env_file: '.env'
 
   airflow-triggerer:
     <<: *airflow-common
@@ -186,7 +184,6 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
-    env_file: '.env'
 
   airflow-init:
     <<: *airflow-common
